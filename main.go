@@ -12,12 +12,19 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/itchyny/volume-go"
+	"github.com/micmonay/keybd_event"
 )
 
 type LoungeTokenScreenList struct {
@@ -42,12 +49,17 @@ type PlaylistInfo struct {
 }
 
 const (
-	defaultScreenName string = "Golang Test TV"
+	defaultScreenName string = "GoCast TV"
 	defaultScreenApp  string = "golang-test-838"
 	screenUid         string = "2a026ce9-4429-4c5e-8ef5-0101eddf5671"
 	timefmt           string = "[2006-01-02 15:04:05]"
 	errCountThresh    int    = 5
 )
+
+type ConfigFile struct {
+	ScreenId          string
+	defaultScreenName string
+}
 
 var (
 	debugLevel    int
@@ -73,6 +85,7 @@ var (
 	curIndex      int
 	curListVideos []Video
 	printLock     sync.Mutex
+	kb            keybd_event.KeyBonding
 )
 
 func init() {
@@ -85,6 +98,24 @@ func init() {
 func main() {
 	flag.Parse()
 	// screen id:
+	//open config file
+	file, err := os.Open("config.json")
+	if err == nil {
+		byteValue, _ := ioutil.ReadAll(file)
+		var result map[string]interface{}
+		err = json.Unmarshal([]byte(byteValue), &result)
+		if err == nil {
+			screenId = result["ScreenId"].(string)
+		}
+
+	}
+	// virtual keyboard
+
+	// For linux, it is very important to wait 2 seconds
+	if runtime.GOOS == "linux" {
+		time.Sleep(2 * time.Second)
+	}
+
 	if screenId == "" {
 		resp, err := http.Get("https://www.youtube.com/api/lounge/pairing/generate_screen_id")
 		if err != nil {
@@ -97,7 +128,13 @@ func main() {
 			panic(err)
 		}
 		screenId = string(body)
+		config := ConfigFile{
+			ScreenId: screenId,
+		}
+		file, _ := json.MarshalIndent(config, "", " ")
+		_ = ioutil.WriteFile("config.json", file, 0644)
 	}
+	defer file.Close()
 	msgPrintln(fmt.Sprint("screen_id ", screenId))
 
 	// lounge token:
@@ -238,6 +275,13 @@ func decodeBindStream(r io.Reader) (err error) {
 	}
 	return
 }
+func runVideo(curVideoId string) {
+	fmt.Println("vlc play ", curVideoId)
+	exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
+	cmd := exec.Command(os.Getenv("PROGRAMFILES")+"\\VideoLAN\\VLC\\vlc.exe", "https://www.youtube.com/watch?v="+curVideoId, "--fullscreen", "--no-video-title-show", "--no-embedded-video", "--no-qt-fs-controller")
+	cmd.Run()
+
+}
 
 // genericCmd interpretes and executes commands from the bind stream
 func genericCmd(index int64, cmd string, paramsList []interface{}) {
@@ -267,6 +311,7 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 	case "remoteDisconnected":
 		data := paramsList[0].(map[string]interface{})
 		id := data["id"].(string)
+		exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
 		msgPrintln(fmt.Sprint("remote_leave ", id))
 	case "getNowPlaying":
 		curTime = time.Now().Sub(startTime)
@@ -314,7 +359,9 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 		if !ok {
 			ctt = ""
 		}
-
+		if curVideoId != "" {
+			go runVideo(curVideoId)
+		}
 		msgPrintln(fmt.Sprint("video_id ", curVideoId))
 		postBind("nowPlaying", map[string]string{
 			"videoId":      curVideoId,
@@ -349,6 +396,11 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 		curListVideos = info.Video
 	case "play":
 		msgPrintln("play")
+		kb.SetKeys(keybd_event.VK_SPACE)
+		err := kb.Launching()
+		if err != nil {
+			panic(err)
+		}
 		playState = "1"
 		startTime = time.Now().Add(-curTime)
 		postBind("onStateChange", map[string]string{
@@ -359,6 +411,11 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 		})
 	case "pause":
 		msgPrintln("pause")
+		kb.SetKeys(keybd_event.VK_SPACE)
+		err := kb.Launching()
+		if err != nil {
+			panic(err)
+		}
 		playState = "2"
 		curTime = time.Now().Sub(startTime)
 		postBind("onStateChange", map[string]string{
@@ -368,13 +425,23 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 			"cpn":         "foo",
 		})
 	case "getVolume":
+		vol, err := volume.GetVolume()
+		if err != nil {
+			log.Fatalf("get volume failed: %+v", err)
+		}
+		currentVolume = strconv.Itoa(vol)
 		postBind("onVolumeChanged", map[string]string{"volume": currentVolume, "muted": "false"})
 	case "setVolume":
 		data := paramsList[0].(map[string]interface{})
-		currentVolume = data["volume"].(string)
+
+		int_setvol, _ := strconv.Atoi(data["volume"].(string))
+		volume.SetVolume(int_setvol)
+		vol, _ := volume.GetVolume()
+		currentVolume = strconv.Itoa(vol)
 		msgPrintln(fmt.Sprint("set_volume ", currentVolume))
 		postBind("onVolumeChanged", map[string]string{"volume": currentVolume, "muted": "false"})
 	case "seekTo":
+		fmt.Println("currentTime", time.Now().Sub(startTime))
 		data := paramsList[0].(map[string]interface{})
 		newTime := data["newTime"].(string)
 		msgPrintln(fmt.Sprint("seek_to ", newTime))
@@ -383,6 +450,7 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 		if err != nil {
 			currentTimeDuration = 0
 		}
+
 		curTime = currentTimeDuration
 		startTime = time.Now().Add(-curTime)
 
@@ -394,6 +462,7 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 		})
 	case "stopVideo":
 		msgPrintln("stop")
+		exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
 		postBind("nowPlaying", map[string]string{})
 	case "onUserActivity":
 		msgPrintln("user_action")
