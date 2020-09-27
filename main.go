@@ -275,11 +275,24 @@ func decodeBindStream(r io.Reader) (err error) {
 	}
 	return
 }
+func killvlc() {
+	switch runtime.GOOS {
+	case "windows":
+		exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
+	case "linux":
+		exec.Command("kilall", "vlc.exe").Run()
+	}
+
+}
 func runVideo(curVideoId string) {
 	fmt.Println("vlc play ", curVideoId)
-	exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
-	cmd := exec.Command(os.Getenv("PROGRAMFILES")+"\\VideoLAN\\VLC\\vlc.exe", "https://www.youtube.com/watch?v="+curVideoId, "--fullscreen", "--no-video-title-show", "--no-embedded-video", "--no-qt-fs-controller")
-	cmd.Run()
+	killvlc()
+	switch runtime.GOOS {
+	case "windows":
+		exec.Command(os.Getenv("PROGRAMFILES")+"\\VideoLAN\\VLC\\vlc.exe", "https://www.youtube.com/watch?v="+curVideoId, "--fullscreen", "--no-video-title-show", "--no-embedded-video", "--no-qt-fs-controller").Run()
+	case "linux":
+		exec.Command("vlc", "https://www.youtube.com/watch?v="+curVideoId, "--fullscreen", "--no-video-title-show", "--no-embedded-video", "--no-qt-fs-controller").Run()
+	}
 
 }
 
@@ -311,7 +324,8 @@ func genericCmd(index int64, cmd string, paramsList []interface{}) {
 	case "remoteDisconnected":
 		data := paramsList[0].(map[string]interface{})
 		id := data["id"].(string)
-		exec.Command("taskkill", "/f", "/im", "vlc.exe").Run()
+		killvlc()
+
 		msgPrintln(fmt.Sprint("remote_leave ", id))
 	case "getNowPlaying":
 		curTime = time.Now().Sub(startTime)
